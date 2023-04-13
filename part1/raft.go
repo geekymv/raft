@@ -23,8 +23,8 @@ type LogEntry struct {
 type CMState int
 
 const (
-	Follower CMState = iota
-	Candidate
+	Follower  CMState = iota
+	Candidate         // 候选人
 	Leader
 	Dead
 )
@@ -60,9 +60,9 @@ type ConsensusModule struct {
 	server *Server
 
 	// Persistent Raft state on all servers
-	currentTerm int
-	votedFor    int
-	log         []LogEntry
+	currentTerm int        // 当前任期，初始为0，单调递增
+	votedFor    int        // 记录上一次投票给ID，接受投票的候选人ID
+	log         []LogEntry // command
 
 	// Volatile Raft state on all servers
 	state              CMState
@@ -77,16 +77,17 @@ func NewConsensusModule(id int, peerIds []int, server *Server, ready <-chan inte
 	cm.id = id
 	cm.peerIds = peerIds
 	cm.server = server
-	cm.state = Follower
+	cm.state = Follower // 初始化是 Follower 状态
 	cm.votedFor = -1
 
 	go func() {
 		// The CM is quiescent until ready is signaled; then, it starts a countdown
 		// for leader election.
-		<-ready
+		<-ready // 会阻塞，等待被唤醒
 		cm.mu.Lock()
 		cm.electionResetEvent = time.Now()
 		cm.mu.Unlock()
+		// 启动选举定时器
 		cm.runElectionTimer()
 	}()
 
@@ -147,6 +148,7 @@ func (cm *ConsensusModule) RequestVote(args RequestVoteArgs, reply *RequestVoteR
 
 	if cm.currentTerm == args.Term &&
 		(cm.votedFor == -1 || cm.votedFor == args.CandidateId) {
+		// 投票
 		reply.VoteGranted = true
 		cm.votedFor = args.CandidateId
 		cm.electionResetEvent = time.Now()
@@ -219,7 +221,9 @@ func (cm *ConsensusModule) electionTimeout() time.Duration {
 // This function is blocking and should be launched in a separate goroutine;
 // it's designed to work for a single (one-shot) election timer, as it exits
 // whenever the CM state changes from follower/candidate or the term changes.
+// 选举定时器
 func (cm *ConsensusModule) runElectionTimer() {
+	// 选举超时时间（伪随机 150～300ms）
 	timeoutDuration := cm.electionTimeout()
 	cm.mu.Lock()
 	termStarted := cm.currentTerm
@@ -240,18 +244,21 @@ func (cm *ConsensusModule) runElectionTimer() {
 		if cm.state != Candidate && cm.state != Follower {
 			cm.dlog("in election timer state=%s, bailing out", cm.state)
 			cm.mu.Unlock()
+			// 已经成为 Leader 退出 for 循环
 			return
 		}
 
 		if termStarted != cm.currentTerm {
 			cm.dlog("in election timer term changed from %d to %d, bailing out", termStarted, cm.currentTerm)
 			cm.mu.Unlock()
+			// term 改变了，退出 for 循环
 			return
 		}
 
 		// Start an election if we haven't heard from a leader or haven't voted for
 		// someone for the duration of the timeout.
 		if elapsed := time.Since(cm.electionResetEvent); elapsed >= timeoutDuration {
+			// 开始选举
 			cm.startElection()
 			cm.mu.Unlock()
 			return
@@ -263,11 +270,11 @@ func (cm *ConsensusModule) runElectionTimer() {
 // startElection starts a new election with this CM as a candidate.
 // Expects cm.mu to be locked.
 func (cm *ConsensusModule) startElection() {
-	cm.state = Candidate
-	cm.currentTerm += 1
+	cm.state = Candidate // 将自己更新成候选人
+	cm.currentTerm += 1  // 任期+1
 	savedCurrentTerm := cm.currentTerm
 	cm.electionResetEvent = time.Now()
-	cm.votedFor = cm.id
+	cm.votedFor = cm.id // 投票给自己
 	cm.dlog("becomes Candidate (currentTerm=%d); log=%v", savedCurrentTerm, cm.log)
 
 	votesReceived := 1
@@ -282,26 +289,32 @@ func (cm *ConsensusModule) startElection() {
 			var reply RequestVoteReply
 
 			cm.dlog("sending RequestVote to %d: %+v", peerId, args)
+			// 发起投票请求
 			if err := cm.server.Call(peerId, "ConsensusModule.RequestVote", args, &reply); err == nil {
 				cm.mu.Lock()
 				defer cm.mu.Unlock()
 				cm.dlog("received RequestVoteReply %+v", reply)
 
 				if cm.state != Candidate {
+					// 有可能票数过半，已经成为Leader/Follower了
 					cm.dlog("while waiting for reply, state = %v", cm.state)
 					return
 				}
 
 				if reply.Term > savedCurrentTerm {
 					cm.dlog("term out of date in RequestVoteReply")
+					// 发起投票响应的 term 大于当前的 term，成为 Follower
 					cm.becomeFollower(reply.Term)
 					return
 				} else if reply.Term == savedCurrentTerm {
 					if reply.VoteGranted {
+						// 投票给当前节点了
 						votesReceived += 1
+						// 票数过半
 						if votesReceived*2 > len(cm.peerIds)+1 {
 							// Won the election!
 							cm.dlog("wins election with %d votes", votesReceived)
+							// 赢得超过半数投票，成为 Leader
 							cm.startLeader()
 							return
 						}
@@ -323,7 +336,7 @@ func (cm *ConsensusModule) becomeFollower(term int) {
 	cm.currentTerm = term
 	cm.votedFor = -1
 	cm.electionResetEvent = time.Now()
-
+	// 变成 Follower 之后，启动选举定时器
 	go cm.runElectionTimer()
 }
 
@@ -339,6 +352,7 @@ func (cm *ConsensusModule) startLeader() {
 
 		// Send periodic heartbeats, as long as still leader.
 		for {
+			// Leader发送心跳
 			cm.leaderSendHeartbeats()
 			<-ticker.C
 
@@ -354,6 +368,7 @@ func (cm *ConsensusModule) startLeader() {
 
 // leaderSendHeartbeats sends a round of heartbeats to all peers, collects their
 // replies and adjusts cm's state.
+// Leader 发送心跳
 func (cm *ConsensusModule) leaderSendHeartbeats() {
 	cm.mu.Lock()
 	if cm.state != Leader {
