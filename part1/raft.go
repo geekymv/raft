@@ -132,7 +132,7 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-// RequestVote RPC.
+// RequestVote RPC. 处理 Candidate(候选人) 发起的投票请求
 func (cm *ConsensusModule) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -148,7 +148,8 @@ func (cm *ConsensusModule) RequestVote(args RequestVoteArgs, reply *RequestVoteR
 
 	if cm.currentTerm == args.Term &&
 		(cm.votedFor == -1 || cm.votedFor == args.CandidateId) {
-		// 投票
+		// term 相等，没有投票或者已经投票给这个 Candidate
+		// 投票给这个 Candidate
 		reply.VoteGranted = true
 		cm.votedFor = args.CandidateId
 		cm.electionResetEvent = time.Now()
@@ -176,6 +177,7 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+// AppendEntries 处理 Leader 发送过来的心跳
 func (cm *ConsensusModule) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -186,6 +188,7 @@ func (cm *ConsensusModule) AppendEntries(args AppendEntriesArgs, reply *AppendEn
 
 	if args.Term > cm.currentTerm {
 		cm.dlog("... term out of date in AppendEntries")
+		// Leader 的 term > 自己的，更新自己为 Follower, term 更新成与 Leader 的 term 相同
 		cm.becomeFollower(args.Term)
 	}
 
@@ -194,10 +197,11 @@ func (cm *ConsensusModule) AppendEntries(args AppendEntriesArgs, reply *AppendEn
 		if cm.state != Follower {
 			cm.becomeFollower(args.Term)
 		}
+		// 更新时间
 		cm.electionResetEvent = time.Now()
 		reply.Success = true
 	}
-
+	// 将自己的 term 返回给 Leader
 	reply.Term = cm.currentTerm
 	cm.dlog("AppendEntries reply: %+v", *reply)
 	return nil
@@ -258,7 +262,7 @@ func (cm *ConsensusModule) runElectionTimer() {
 		// Start an election if we haven't heard from a leader or haven't voted for
 		// someone for the duration of the timeout.
 		if elapsed := time.Since(cm.electionResetEvent); elapsed >= timeoutDuration {
-			// 开始选举
+			// electionResetEvent 超过 timeoutDuration 时间没有更新了，开始发起 Leader 选举
 			cm.startElection()
 			cm.mu.Unlock()
 			return
@@ -386,6 +390,7 @@ func (cm *ConsensusModule) leaderSendHeartbeats() {
 		go func(peerId int) {
 			cm.dlog("sending AppendEntries to %v: ni=%d, args=%+v", peerId, 0, args)
 			var reply AppendEntriesReply
+			// 发送心跳
 			if err := cm.server.Call(peerId, "ConsensusModule.AppendEntries", args, &reply); err == nil {
 				cm.mu.Lock()
 				defer cm.mu.Unlock()
