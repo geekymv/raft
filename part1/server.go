@@ -62,6 +62,7 @@ func (s *Server) Serve() {
 	s.rpcServer.RegisterName("ConsensusModule", s.rpcProxy)
 
 	var err error
+	// :0 会自动选择一个端口号
 	s.listener, err = net.Listen("tcp", ":0")
 	if err != nil {
 		log.Fatal(err)
@@ -118,6 +119,7 @@ func (s *Server) GetListenAddr() net.Addr {
 	return s.listener.Addr()
 }
 
+// 与其他 Server 建立连接
 func (s *Server) ConnectToPeer(peerId int, addr net.Addr) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

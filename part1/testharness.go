@@ -41,11 +41,13 @@ func NewHarness(t *testing.T, n int) *Harness {
 		peerIds := make([]int, 0)
 		for p := 0; p < n; p++ {
 			if p != i {
+				// 其他 Server ID（不包括自己）
 				peerIds = append(peerIds, p)
 			}
 		}
 
 		ns[i] = NewServer(i, peerIds, ready)
+		// 启动 Server
 		ns[i].Serve()
 	}
 
@@ -53,6 +55,7 @@ func NewHarness(t *testing.T, n int) *Harness {
 	for i := 0; i < n; i++ {
 		for j := 0; j < n; j++ {
 			if i != j {
+				// 和其他 Server 建立连接
 				ns[i].ConnectToPeer(j, ns[j].GetListenAddr())
 			}
 		}
